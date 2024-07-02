@@ -1,0 +1,94 @@
+name: docker-publish
+
+on:
+  schedule:
+    - cron:  '0 0 * * *'
+  push:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  packages: write
+  contents: write
+
+jobs:
+  update-nix-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - uses: fregante/setup-git-user@v2
+      
+      - name: Install Nix
+        uses: cachix/install-nix-action@v20
+        with:
+          extra_nix_config: 'experimental-features = nix-command flakes'
+          nix_path: nixpkgs=channel:nixos-unstable
+          
+      - name: Update lockfiles
+        run: |
+          set -euxo pipefail
+          
+          nix flake update
+          
+          if [[ -n $(git status -s) ]]; then
+            git add .
+            git commit -am 'Update the nix lockfiles'
+            git push
+          fi
+  build:
+    needs: update-nix-deps
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/cache@v3.0.8
+        id: nix-cache
+        with:
+          path: /tmp/nixcache
+          key: ${{ runner.os }}-nix-cache
+
+      - uses: cachix/install-nix-action@v15
+        with:
+          extra_nix_config: 'experimental-features = nix-command flakes'
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - if: steps.nix-cache.outputs.cache-hit == 'true'
+        run: "nix-store --import < /tmp/nixcache"
+
+      - run: nix build .#dockerImage.$(uname -m)-linux -o result
+
+      - run: cat result > image.gz
+
+      - if: steps.nix-cache.outputs.cache-hit != 'true'
+        run: "nix-store --export $(find /nix/store -maxdepth 1 -name '*-*') > /tmp/nixcache"
+
+      - run: echo "POWERDNS_VERSION=$(nix eval .#version.$(uname -m)-linux --raw)" >> $GITHUB_ENV
+
+      - uses: actions-hub/docker/login@master
+        env:
+            DOCKER_USERNAME: "${{ github.actor }}"
+            DOCKER_PASSWORD: "${{ secrets.GITHUB_TOKEN }}"
+            DOCKER_REGISTRY_URL: ghcr.io
+
+      - uses: actions-hub/docker@master
+        with:
+          args: load < /github/workspace/image.gz
+
+      - uses: actions-hub/docker@master
+        with:
+          args: tag ghcr.io/farcaller/powerdns-docker:latest ghcr.io/farcaller/powerdns-docker:${{ env.POWERDNS_VERSION }}
+
+      - uses: actions-hub/docker@master
+        with:
+          args: push ghcr.io/farcaller/powerdns-docker:latest
+
+      - uses: actions-hub/docker@master
+        with:
+          args: push ghcr.io/farcaller/powerdns-docker:${{ env.POWERDNS_VERSION }}
