@@ -1,0 +1,95 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/v1.30.0/_definitions.json#/definitions/io.k8s.api.apps.v1.Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: powerdns
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: powerdns }
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels: { app: powerdns }
+    spec:
+      containers:
+        - name: powerdns
+          # you can pull a specific version or run the latest
+          image: ghcr.io/farcaller/powerdns-docker:latest
+          imagePullPolicy: Always
+          # I recommend running with local-port=5353 or similar, so that you
+          # don't need any privileges at all. Powerdns doesn't need a privileged
+          # user, nor it doesn't need an RW flesystem.
+          ports:
+            - name: dns-tcp
+              containerPort: 5353
+              protocol: TCP
+            - name: dns-udp
+              containerPort: 5353
+              protocol: UDP
+            - name: http
+              containerPort: 8053
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            # The image will pull the config from /config/pdns.conf by default
+            - mountPath: /config
+              name: config
+              readOnly: true
+            # And it will have the control socket in /tmp
+            - mountPath: /tmp
+              name: tmp
+            - mountPath: /data
+              name: data
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      volumes:
+        - name: config
+          secret:
+            secretName: powerdns-config
+        # Don't forget to persist this!
+        - name: data
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/v1.30.0/_definitions.json#/definitions/io.k8s.api.core.v1.Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: powerdns-dns
+spec:
+  # Expose this to whoever needs to resolve the DNS requests
+  type: LoadBalancer
+  ports:
+    - name: dns-tcp
+      targetPort: 5353
+      port: 53
+      protocol: TCP
+    - name: dns-udp
+      targetPort: 5353
+      port: 53
+      protocol: UDP
+  selector:
+    app: powerdns
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/v1.30.0/_definitions.json#/definitions/io.k8s.api.core.v1.Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: powerdns-web
+spec:
+  # And point e.g. External-DNS at this
+  ports:
+    - name: http
+      targetPort: 8053
+      port: 80
+      protocol: TCP
+  selector:
+    app: powerdns
